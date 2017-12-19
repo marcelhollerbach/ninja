@@ -36,6 +36,8 @@
 #ifndef _WIN32
 #include <unistd.h>
 #include <sys/time.h>
+#else
+#include <windows.h>
 #endif
 
 #include <vector>
@@ -605,7 +607,82 @@ bool Truncate(const string& path, size_t size, string* err) {
   return true;
 }
 
+#ifdef _WIN32
+BOOL SetPrivilege(
+    HANDLE hToken,          // access token handle
+    LPCTSTR lpszPrivilege,  // name of privilege to enable/disable
+    BOOL bEnablePrivilege   // to enable or disable privilege
+    )
+{
+    TOKEN_PRIVILEGES tp;
+    LUID luid;
+
+    if ( !LookupPrivilegeValue(
+            NULL,            // lookup privilege on local system
+            lpszPrivilege,   // privilege to lookup
+            &luid ) )        // receives LUID of privilege
+    {
+        printf("LookupPrivilegeValue error: %u\n", GetLastError() );
+        return FALSE;
+    }
+
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Luid = luid;
+    if (bEnablePrivilege)
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    else
+        tp.Privileges[0].Attributes = 0;
+
+    // Enable the privilege or disable all privileges.
+
+    if ( !AdjustTokenPrivileges(
+           hToken,
+           FALSE,
+           &tp,
+           sizeof(TOKEN_PRIVILEGES),
+           (PTOKEN_PRIVILEGES) NULL,
+           (PDWORD) NULL) )
+    {
+          printf("AdjustTokenPrivileges error: %u\n", GetLastError() );
+          return FALSE;
+    }
+
+    if (GetLastError() == ERROR_NOT_ALL_ASSIGNED)
+
+    {
+          printf("The token does not have the specified privilege. \n");
+          return FALSE;
+    }
+
+    return TRUE;
+}
+#endif
+
 bool ReplaceContent(const string& path, const string& old_path, string* err) {
+#ifdef _WIN32
+  HANDLE token;
+  DWORD len;
+  PSECURITY_DESCRIPTOR security = NULL;
+  PSID sidPtr = NULL;
+  int retValue = 1;
+
+  // Get the privileges you need
+  if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &token)) {
+      SetPrivilege(token, "SeTakeOwnershipPrivilege", 1);
+      SetPrivilege(token, "SeSecurityPrivilege", 1);
+      SetPrivilege(token, "SeBackupPrivilege", 1);
+      SetPrivilege(token, "SeRestorePrivilege", 1);
+  } else {
+     //FIXME
+     return false;
+  }
+
+  // Create the security descriptor
+  if (!GetFileSecurity(path.c_str(), OWNER_SECURITY_INFORMATION, security, 0, &len)) {
+    //*err = GetLastError();
+    return false;
+  }
+#else
   struct stat old_file;
   bool found_uid_gid = true;
 
@@ -614,6 +691,7 @@ bool ReplaceContent(const string& path, const string& old_path, string* err) {
     //save if we found the stat
     found_uid_gid = false;
   }
+#endif
 
   if (unlink(path.c_str()) < 0) {
     *err = strerror(errno);
@@ -625,6 +703,12 @@ bool ReplaceContent(const string& path, const string& old_path, string* err) {
     return false;
   }
 
+#ifdef _WIN32
+  // Save the security descriptor
+  if (!SetFileSecurity(path.c_str(), OWNER_SECURITY_INFORMATION, security)) {
+    return false;
+  }
+#else
   //apply uid and gid again so we always stay as the uid and gid of the first caller that created a file
   if (found_uid_gid) {
     if (chown(path.c_str(), old_file.st_uid, old_file.st_gid)) {
@@ -632,5 +716,6 @@ bool ReplaceContent(const string& path, const string& old_path, string* err) {
       return false;
     }
   }
+#endif
   return true;
 }
